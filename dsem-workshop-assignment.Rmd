@@ -1,0 +1,409 @@
+---
+title: "DSEM workshop"
+author: "Jessica Schaaf and Michael Aristodemou"
+date: "January 2025"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Welcome to this tutorial on Dynamic Structural Equation Models (DSEMs; [Asparouhov et al., 2018](https://www.tandfonline.com/doi/full/10.1080/10705511.2017.1406803); [McNeish et al., 2020](https://oce.ovid.com/article/00060744-202010000-00005/HTML)) and how to fit them in Stan! This tutorial requires basic R skills. Some experience with time series modeling and/or Stan is helpful but not required. After completing this tutorial, you will be able to understand the basics of DSEM and Stan, to fit a Standard DSEM and a DYNASTI DSEM with fixed and random effects in Stan, and to add covariates and predictors of parameters.
+
+Below you see eight tabs. The first tab *Intro to DSEM* contains information on DSEMs and their parameters. The second tab *Get started* contains R code needed to use Stan and code to load and format example data. The third tab *Implementing models in Stan* contains some background information on Stan models. The rest of the tabs contain step-by-step exercises to get familiar with fitting DSEMs in Stan.
+
+## Content {.tabset .tabset-pills}
+
+### Intro to DSEM
+
+This is a short introduction to DSEM, with pictures!
+
+DSEM is used to analyze time series data. Time series data has multiple observations for a given subject on one or multiple variables. For example, if we measure John's urge to smoke every day for 50 days we will get the kind of data we need. DSEM is also useful for when we have multiple observations for multiple subjects. Thus, it is instructive to think of DSEM as being composed of two models: (1) a within-subject model, describing a subject's mean and variation around that mean that happens over time and (2) a between-subject model, capturing how these subject-specific characteristics differ between subjects. The number of parameters in a DSEM can vary depending on the substantive question you would like to answer. In this workshop we will go over the most popular DSEM which consists of three parameters. In the figure below you can see a visual representation of the three-parameter DSEM. We will break down each of these parameters below using our running example of smoking urges. 
+
+![](https://github.com/JessicaSchaaf/dsemworkshop/raw/main/Figures/DSEM_full.png)
+
+<font size="4">**1. Mean urge to smoke ($\mu$)**</font>
+
+The mean describes the average of a subject's urge to smoke across all 50 days. This can be thought of as a stable point around which any variation happens. Subjects can differ in their mean value: as shown in the left panel of the figure below, the subject in <span style="color: blue;">blue</span> has a <span style="color: blue;">higher mean urge to smoke</span>. In the right panel, the model is described mathematically. We model a subject's mean urge to smoke ($\mu_{i}$) as the sum of a population-level mean ($\gamma_{1}$) and a subject-specific deviation from that population-level mean ($\upsilon_{1i}$). In such a hierarchical framework, population-level effects are called fixed effects and the *sds* (or variances) of subject-specific effects are called random effects. Note that you estimate sds of subject-specific effects, because estimating all separate effects is computationally expensive (read: impossible).
+
+![](https://github.com/JessicaSchaaf/dsemworkshop/raw/main/Figures/mean_DSEMc.png)
+
+<font size="4">**2. Autoregression (AR-1; $\phi$)**</font>
+ 
+How much the urge to smoke on a given day differs from the mean urge across all 50 days is called a deviation. How much these deviations linger over time, that is, for how long subsequent urges will stay above or below the subject's mean urge, is captured by the autoregressive parameter. For example, when a subject with a <span style="color: blue;">high positive autoregressive parameter</span> (<span style="color: blue;">blue</span> in left panel of the figure below) reports an urge to smoke that is higher than their mean urge, you can expect them to stay at that elevated level for longer than someone with a <span style="color: red;">lower autoregressive parameter</span> (<span style="color: red;">red</span> in left panel of figure). In the right panel, the statistical model again shows how a subject's autoregressive parameter ($\phi_{i}$) is composed of a population-level autoregressive parameter ($\gamma_{2}$) and a subject-specific deviation ($\upsilon_{2i}$).
+
+![](https://github.com/JessicaSchaaf/dsemworkshop/raw/main/Figures/ar1_DSEMc.png)
+
+<font size="4">**3. Residual Variance ($\psi$)**</font>
+
+After taking into account the variation in urges that is explained by autoregression, our model still doesn't fully capture all fluctuations. That is, we still have residual variation left. For example, two people who have the same level of urges on average and the same autoregression, may still differ in their day-to-day residual variation in their urges. In the left panel of the figure below, the two people shown are equal on all other parameters except their residual variance (<span style="color: blue;">blue has greater residual variance</span>). As can be seen in the right panel of the figure below, the general structure of the residual variances is the same as for the mean and autoregression: a subject's residual variance ($\psi_{i}$) is composed of a population-level parameter ($\gamma_{3}$) and a subject-specific deviation ($\upsilon_{3i}$). You can ignore the exponential term for now, we explain it in the *Fitting a standard DSEM* module.
+
+![](https://github.com/JessicaSchaaf/dsemworkshop/raw/main/Figures/omega_DSEMc.png)
+
+To get started, go <a href="#top">back to the top</a>.
+
+### Get started
+Before we start coding, let's take care of some prerequisites. If you do not have R ([R Core Team, 2024](https://www.R-project.org/)) and its user-friendly interface RStudio installed, please do so following the steps on [this website](https://posit.co/download/rstudio-desktop/).
+
+Once installed, you also need to install the RStan package to enable R to use the computing platform.
+
+**Exercise 0: Install RStan using the R console.**
+
+```{r class.source = "fold-show", install, message=FALSE, warning=FALSE}
+if(!require(rstan)){install.packages("rstan")}
+require(rstan)
+```
+
+The next step is accessing the example data on smoking urges through GitHub and getting a feel for them. 
+
+**Exercise 1: Load the data. What variables are in the data set? How many subjects? And how many time points?**
+
+```{r class.source = "fold-show", loaddata, message=FALSE, warning=FALSE}
+dat <- read.csv("https://raw.githubusercontent.com/JessicaSchaaf/dsemworkshop/main/Data/Two-Level%20Data.csv",header=T) #load McNeish data
+```
+
+There are `r ncol(dat)` variables in the data set, for `r length(unique(dat$subject))` subjects across `r max(dat$time)` time points. These variables are subject's smoking urges ('urge'), their depressive symptoms ('dep'), job stress ('js'), home stress ('hs'), subject ids ('subject'), and time ('time').
+
+We are interested in the following research questions \
+Q1. What are subject's average smoking urges? \
+Q2. How do urges linger over time? \
+Q3. How do these effects differ across subjects? and \
+Q4. How do urges relate to concurrent depressive symptoms?
+
+Let's prepare the data to enable you to fit a DSEM to answer the research questions.
+
+**Exercise 2: First create an object <code>Nsubj</code> that contains the number of subjects and an object <code>Nobs</code> that contains the number of observations/time points.**
+
+```{r class.source = "fold-show", vars1}
+##### Your code here #####
+```
+
+**Exercise 3: Create two matrices of dimensions <code>Nsubj x Nobs</code> that contain the urges data (call this object <code>urges</code>) and the depression data (call this object <code>dep</code>).**
+
+```{r class.source = "fold-show", vars2}
+##### Your code here #####
+```
+
+**Exercise 4: Plot the time series of smoking urges with time on the x-axis and urges, averaged across subjects, on the y-axis.**
+
+```{r class.source = "fold-show", plot}
+##### Your code here #####
+```
+
+To continue to the next module and learn about Stan models go <a href="#top">back to the top</a>.
+
+### Implementing models in Stan
+
+Before getting into how to fit models in Stan, first some background on how to construct Stan models. You may or may not wish to alter or fully implement models yourself. Either way, understanding the basics may help understand what is going on behind the scenes. A Stan model is built up using [several blocks](https://mc-stan.org/docs/2_18/reference-manual/overview-of-stans-program-blocks.html). A simple model often requires a data block, a model block, and a parameters block.
+
+<font size="4">**The data block**</font>
+
+In the *data block*, you specify which data to run the model on. You provide these data from a different program, for example, R. A standard DSEM requires three types of data to be transferred from R to Stan: the number of subjects, the number of time points or observations, and the time series data. In Stan, for each variable, you also have to indicate the [variable type](https://mc-stan.org/docs/reference-manual/types.html) and its dimensions. The number of subjects (which we call <code>N</code>) is just a single integer, as is the number of observations (which we call <code>T</code>). The time series data is a two-dimensional object of dimensions <code>N x T</code>. In Stan, this is implemented as follows:
+
+&nbsp; &nbsp; data { \
+&nbsp; &nbsp; &nbsp; &nbsp; int<lower=1> N; &nbsp; &nbsp; &nbsp; &nbsp;  // number of subjects \
+&nbsp; &nbsp; &nbsp; &nbsp; int<lower=1> T; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;// number of observations \
+&nbsp; &nbsp; &nbsp; &nbsp; array[N] vector[T] Y; &nbsp; // time series data \
+&nbsp; } 
+
+Important to note here is that Stan doesn't require a certain set of variable names. In other words, you can call variables as you wish. Just be sure to be consistent; otherwise Stan will give you a semantic error ("Identifier '...' not in scope.").
+
+<font size="4">**The parameters block**</font>
+
+In the *parameters block*, you specify which parameters to sample in the model. In a standard DSEM the parameters consist of the population-level mean, autoregression, and residual variance (which we call gammas as is common notation in hierarchical modeling), and the subject-specific deviations (<code>u's</code>). They also consist of parameters needed to construct the covariance matrix of subject-specific deviations (which we call <code>Omega</code>). Although this is necessary to fit the model, we do not go into the details here to avoid overly mathematical discussion. The population-level parameters (<code>gamma</code>) are implemented as a vector of size 3 and the subject-specific deviations (<code>u</code>) as a two-dimensional object of size <code>N x 3</code>:
+
+&nbsp; &nbsp; parameters { \
+&nbsp; &nbsp; &nbsp; &nbsp; vector[3] gamma; &nbsp; &nbsp; &nbsp; // population-level effects \
+&nbsp; &nbsp; &nbsp; &nbsp; array[N] vector[3] u; &nbsp; // subject-specific deviations \
+&nbsp; &nbsp; } \
+
+<font size="4">**The model block**</font>
+
+In the *model block*, you specify the model to fit on the data and, as Stan uses Bayesian estimation, the prior distributions for all parameters.
+
+<font size="3">**The model**</font>
+
+In our case the model is a standard DSEM, which mathematically can be described as follows: 
+
+\begin{equation}
+Y(t) = \mu + \delta(t)\label{eq1}\tag{1}
+\end{equation}
+
+where <code>Y</code> indicates the subject's smoking urges across trials <code>t</code>, $\mu$ (<code>mu</code>) is the mean urge, and $\delta$ (<code>delta</code>) is the deviation of the observed urges from the mean urge on a specific trial.
+
+The lingering of deviations from the mean urge over time is captured in an additional parameter $\phi$ (<code>phi</code>), called the autoregressive effect. Mathematically, this lingering is formulated as
+
+\begin{equation}
+\delta(t) = \phi\delta(t-1) + \epsilon(t)\label{eq2}\tag{2}
+\end{equation}
+
+where $\epsilon$ (<code>epsilon</code>) is the residual after taking lingering of deviations into account. 
+
+In Stan we implement Equation \ref{eq2} by specifying that the deviation for subject <code>i</code> on trial <code>t</code> (<code>delta[i][t]</code>) comes from a normal distribution with a mean equal to the autoregressive effect for that subject (<code>phi[i] * delta[i][t-1]</code>). In Stan, we also need to specify the standard deviation of this normal distribution. Do you remember from the *Intro to DSEM* module that one of the parameters of a DSEM is the residual variance? This is where this residual variance comes into play. You have just learned from Equation \ref{eq2} that the residuals are called $\epsilon$. From this follows that the residual variance is var($\epsilon_{i,t}$), which we call $\psi$ (<code>psi</code>). However, as Stan requires standard deviations instead of variances, we need to take the squared root of the residual variance (<code>sqrt(psi[i])</code>).
+
+&nbsp; &nbsp; model { \
+&nbsp; &nbsp; &nbsp; &nbsp; for (i in 1:N) { &nbsp; &nbsp; &nbsp; // loop across subjects \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; for (t in 2:T) { &nbsp; // loop across observations \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // likelihood of observing data given model parameters \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; target += normal_lpdf(delta[i][t] | phi[i] * delta[i][t-1], sqrt(psi[i])); \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; } \
+&nbsp; &nbsp; &nbsp; &nbsp; } \
+&nbsp; &nbsp; } \
+
+Likely, you have never encountered the <code>target +=</code> notation in the code snippet above. It is just a way of telling Stan to incrementally update the log likelihood (hence <code>_lpdf</code> which stands for log probability density function). It is mathematically equivalent to <code>delta[i][t] ~ normal(phi[i] * delta[i][t-1], sqrt(psi[i]))</code>, which may look more familiar. 
+
+Also in the model block, we specify the likelihood of the subject-specific deviations. As you may remember from simple, or even multilevel, regression, deviations are usually assumed normally distributed with a mean of zero. Here we specify something similar. Specially, we tell Stan that subject-specific deviations (<code>u</code>) are multivariate normally distributed with means of zero (<code>rep_vector(0,3)</code>, which is a vector of three zeros) and covariance matrix <code>Omega</code>. This multivariate implementation enables you to assess whether subject-specific effects are correlated. For example, whether subjects with a higher mean have lower residual variance or vice versa.
+
+&nbsp; &nbsp; model { \
+&nbsp; &nbsp; &nbsp; &nbsp; for (i in 1:N) { \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; // likelihood of subject-specific deviations \
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; target += multi_normal_lpdf(u[i] | rep_vector(0,3), Omega); \
+&nbsp; &nbsp; &nbsp; &nbsp; } \
+&nbsp; &nbsp; } \    
+
+<font size="3">**Prior distributions**</font>
+
+In the *model block*, you also specify prior distributions for the parameters in the *parameters block*. For the population-level parameters (<code>gammas</code>), we implement a normal distribution with a mean of zero and a standard deviation of 3.
+
+&nbsp; &nbsp; model { \
+&nbsp; &nbsp; &nbsp; &nbsp; // prior on population-level parameters \
+&nbsp; &nbsp; &nbsp; &nbsp; target += normal_lpdf(gamma | 0, 3); \
+&nbsp; &nbsp; } \    
+
+<font size="4">**The transformed parameters and generated quantities blocks**</font>
+
+You may also add a *transformed parameters block* (in which you specify parameter transformations), and a *generated quantities block* (in which you compute additional outputs such as posterior predictives). Importantly, the model block runs locally. So if you want to use variables or parameters in the generated quantities block, you need to specify these in the transformed parameters block (instead of the model block). But that is for later.
+
+<a href="#top">Go back to the top</a> for the real fun to start in the next module.
+
+### Fitting a simple DSEM
+
+In the *Get Started* module, you have prepared all necessary data to fit a DSEM to the example data on smoking urges. Stan requires data to be formatted in a list. Besides, in the Stan model, we have used the names <code>N</code> for the number of subjects, <code>T</code> for the number of time points or observations, and <code>Y</code> for the time series data. To enable Stan to recognize which data are which, you need to use these names (<code>N</code>, <code>T</code>, and <code>Y</code>) in the list. We start simple and only focus on the first two RQs, that is, mean smoking urge and how urges linger over time.
+
+**Exercise 5: Create a list (called datUrges) that contains the number of subjects (<code>N</code>), the number of observations (<code>T</code>), and the time series data (<code>Y</code>) which in this case is smoking urges.**
+  
+```{r class.source = "fold-show", listforStan}
+##### Your code here #####
+```
+
+We are now going to fit a DSEM with three parameters: mean, autoregression, and residual variance. As you may have noticed while plotting the data in the previous module, the urges data are centered around zero and have a fairly stable average over time. This indicates the data are detrended. As such, we do not have to worry about trends in our data and can omit a parameter capturing this trend in the DSEM. Beware that your own data may contain trends and that you should either deal with this before modeling (through detrending like in our example) or by including a trend in the DSEM. Code for a DSEM including trend is available [here](https://osf.io/gkfd2).
+
+We have already programmed the three-parameter DSEM in Stan for you below. In the *Implementing a DSEM in Stan* module, we explained the core of what we implemented. For now, you have to believe that we coded the model correctly. Remember that in the model <code>gammas</code> indicate population-level effects. Specifically, <code>gamma[1]</code> is the population-level mean, <code>gamma[2]</code> the population-level autoregression, and <code>gamma[3]</code> the population-level residual variance.
+
+```{r class.source = "fold-show", stancode, include=F}
+mymodel = "
+data {
+  int<lower=1> N; 		 	// number of subjects
+  int<lower=1> T; 		 	// number of observations
+  array[N] vector[T] Y; 		// time series data
+}
+
+parameters {
+  vector[3] gamma; 	      	 	// population-level effects
+  array[N] vector[3] u;  	 	// subject-specific deviations
+
+  // for covariance matrix of subject-specific deviations
+  cholesky_factor_corr[3] L_Omega; 	// Cholesky factor
+  vector<lower=0>[3] tau_Omega;		// vector of standard deviations
+}
+
+transformed parameters {
+  // construct covariance matrix from Cholesky factors and standard deviations
+  corr_matrix[3] R_Omega; // correlation matrix
+  R_Omega = multiply_lower_tri_self_transpose(L_Omega); // R = L* L'
+  // quad_form_diag: diag_matrix(tau) * R * diag_matrix(tau)
+  cov_matrix[3] Omega = quad_form_diag(R_Omega, tau_Omega);
+  
+  // subject-specific parameters
+  vector[N] mu;  			// mean
+  vector[N] phi; 			// autoregression
+  vector[N] psi; 			// residual variance
+
+  // object for deviation from mean
+  array[N] vector[T] delta;	
+
+  for (i in 1:N) {
+    // to obtain subject-specific effects, 
+    // sum population-level effects and subjects-specific deviations
+    mu[i] = gamma[1] + u[i][1];
+    phi[i] = gamma[2] + u[i][2];
+    // note gamma[3] and u[i][3] are estimated on a log-scale
+    // to assume normal distribution which simplifies estimation
+    psi[i] = exp(gamma[3] + u[i][3]);
+    // calculate deviations by subtracting mean
+    delta[i] = Y[i] - mu[i];
+  }
+}
+
+model {
+  // prior distributions
+  // .. for the population-level parameters
+  target += normal_lpdf(gamma | 0, 3); 
+  // .. for the Cholesky factor
+  target += lkj_corr_cholesky_lpdf(L_Omega | 1.0);
+  // .. for the vector of standard deviations
+  target += cauchy_lpdf(tau_Omega | 0, 2.5);
+
+  // likelihood
+  for (i in 1:N) {
+    // subject-specific deviations
+    target += multi_normal_lpdf(u[i] | rep_vector(0,3), Omega);
+    
+    for (t in 2:T) {
+      // data given model parameters
+      target += normal_lpdf(delta[i][t] | phi[i] * delta[i][t-1], sqrt(psi[i]));
+    }
+  }
+}
+"
+```
+
+**Exercise 6: Fit the three-parameter DSEM using the <code>stan()</code> function from the rstan package. The argument <code>model_code</code> should be set to 'mymodel', the object in which we programmed the model code. The <code>data</code> argument should contain the data list you created in exercise 5. In the <code>pars</code> argument you may specify (using a character string) which parameters to keep track of. For now, keep track of population-level effects (<code>gammas</code>) and standard deviations of subject-specific effects (<code>tau_Omega</code>). Set the <code>iter</code> argument to 1000 iterations. And for reproducibility, set the <code>seed</code> argument to 42.**
+
+```{r class.source = "fold-show", fitDSEM}
+##### Your code here #####
+```
+
+**Exercise 7: Print the fit results for the population-level effects using the <code>print()</code> function.**
+
+```{r class.source = "fold-show", getResults}
+##### Your code here #####
+```
+
+The output from exercise 7, gives you information on many things. As Stan uses Bayesian estimation, the <code>mean</code> indicates the mean of the posterior distribution of each parameter. This value is often reported as 'the best estimate of the parameter'. The standard error of the mean (<code>se_mean</code>) indicates how stable the mean is estimated across iterations, with large values indicating unstable estimates. The standard deviation (<code>sd</code>) indicates how uncertain that mean is (the higher the more uncertain). The following columns the <code>print()</code> function returns indicate quantiles. This is very helpful as you may use these to report credible intervals (similar to confidence intervals in frequentist statistics). For instance, the 2.5% and 97.5% quantiles give you the 95% credible interval. The final two columns can be used to check how well your model performs and how well parameters are estimated. <code>n_eff</code> stand for number of effective samples which indicates how effective sampling was done. Without going into too much detail, the <code>Rhat</code> statistic ([Gelman & Rubin, 1992](https://projecteuclid.org/journals/statistical-science/volume-7/issue-4/Inference-from-Iterative-Simulation-Using-Multiple-Sequences/10.1214/ss/1177011136.pdf)) gives you an indication of model convergence. Ideally Rhats are 1; values above 1.1 are typically interpreted as convergence problems. 
+
+**Exercise 8: Report results on the first two RQs, that is, what the average smoking urge is and how urges linger over time.**
+
+Go <a href="#top">back to the top</a> to move on to investigating individual differences.
+
+### Investigating individual differences
+
+Moving on to answering the third RQ, that is, whether subjects differ in their mean smoking urge and how urges linger over time. 
+
+In exercise 6, you not only tracked population-level effects (<code>gammas</code>), but also standard deviations in subject-specific effects (<code>tau_Omega</code>) in the <code>pars</code> argument. These parameter estimates indicate to what extent subjects differ in their mean, autoregression, and residual variance. <code>tau_Omega</code> contains three values: <code>tau_Omega[1]</code> is the sd of subject-specific means, <code>tau_Omega[2]</code> of subject-specific autoregressions, and <code>tau_Omega[3]</code> of subject-specific residual variance.
+
+**Exercise 9: Use the <code>print()</code> function to get fit results for the standard deviations of subject-specific effects. Then report on the third RQ.**
+
+```{r class.source = "fold-show", getResults2}
+##### Your code here #####
+```
+
+If you wish to investigate subject-specific effects, you need to keep track of those effects while fitting the model. The subject-specific means are called <code>mu</code>, the subject-specific autoregressions <code>phi</code>, and the residual variances <code>psi</code>. Beware that there are <code>3 times N</code> subject-specific effects in the model so keeping track of them makes model fitting take substantially longer. To speed up estimation, you may run <code>options(mc.cores = parallel::detectCores())</code> in the R console to run sampling chains in parallel.
+
+**Exercise 10: Refit the model but now keep track of the three subject-specific effects. Use the same settings as in exercise 6, except for the <code>pars</code> argument.**
+
+```{r class.source = "fold-show", fitDSEM_ind}
+##### Your code here #####
+```
+
+You can extract the posterior samples for easy plotting with the <code>extract()</code> function. This returns an object that contains the posterior samples for the tracked parameters. Beware that the elements in the object have dimensions <code>number of samples x number of parameters</code> for population-level effects, and <code>number of samples x number of participants</code> for subject-specific effects.
+
+**Exercise 11: Extract the posterior samples and then plot the subject-specific estimates to visualize individual differences.**
+
+```{r class.source = "fold-show", plot_ind}
+##### Your code here #####
+```
+
+**Exercise 12: Report on the third RQ. Are there substantial individual differences in mean urges and lingering of urges?**
+
+Now let's <a href="#top">move on</a> to adding covariates to answer the fourth RQ.
+
+### Adding covariates
+
+The fourth RQ concerns a covariate, namely how concurrent depressive symptoms relate to smoking urges. This covariate needs to be added to the Stan model. We have already implemented such a covariate in a Stan model. Yet, it may be helpful to understand what needs to be changed to include an additional predictor. First, in the *data block*, we declared that we have additional data (which we called <code>X</code>) to be modeled. Second, in the *parameters block*, we added a population-level parameter for the covariate effect (an additional <code>gamma</code>). Third, also in the *parameters block*, we added subject-specific effects (<code>u's</code>) for the covariate. Beware that effects can only differ between subjects when a predictor varies from trial-to-trial, not for subject-specific predictors. Fourth, in the *model block*, we changed the prior distribution of the subject-specific effects to indicate that we now have four (instead of three) deviations per subject. And fifth, also in the *model block*, we changed the formula for the actual model, stating that the mean is now not only determined by the autoregressive effect (Equation \ref{eq5} in the *Implementing models in Stan* module), but also by the covariate.
+
+The complete model is implemented in the object <code>mymodelcov</code> below.
+
+```{r class.source = "fold-show", stancode2, include=F}
+mymodelcov = "
+data {
+  int<lower=1> N; 		 	    // number of subjects
+  int<lower=1> T; 		 	    // number of observations
+  array[N] vector[T] Y; 		// time series data
+  array[N] vector[T] X;			// covariate
+}
+
+parameters {
+  vector[4] gamma; 	      	 	    // population-level effects
+  array[N] vector[4] u;  	 	    // subject-specific deviations
+
+  // for covariance matrix of subject-specific deviations
+  cholesky_factor_corr[4] L_Omega; 	// Cholesky factor
+  vector<lower=0>[4] tau_Omega;		// vector of standard deviations
+}
+
+transformed parameters {
+  // construct covariance matrix from Cholesky factors and standard deviations
+  corr_matrix[4] R_Omega; // correlation matrix
+  R_Omega = multiply_lower_tri_self_transpose(L_Omega); // R = L* L'
+  // quad_form_diag: diag_matrix(tau) * R * diag_matrix(tau)
+  cov_matrix[4] Omega = quad_form_diag(R_Omega, tau_Omega);
+  
+  // subject-specific parameters
+  vector[N] mu;  			// mean
+  vector[N] phi; 			// autoregression
+  vector[N] psi; 			// residual variance
+  vector[N] alpha;			// effect of covariate
+
+  // object for deviation from mean
+  array[N] vector[T] delta;	
+
+  for (i in 1:N) {
+    // to obtain subject-specific effects, 
+    // sum population-level effects and subjects-specific deviations
+    mu[i] = gamma[1] + u[i][1];
+    phi[i] = gamma[2] + u[i][2];
+    // note gamma[3] and u[i][3] are estimated on a log-scale
+    // to assume normal distribution which simplifies estimation
+    psi[i] = exp(gamma[3] + u[i][3]);
+    alpha[i] = gamma[4] + u[i][4];
+    // calculate deviations by subtracting mean
+    delta[i] = Y[i] - mu[i];
+  }
+}
+
+model {
+  // prior distributions
+  // .. for the population-level parameters
+  target += normal_lpdf(gamma | 0, 3); 
+  // .. for the Cholesky factor
+  target += lkj_corr_cholesky_lpdf(L_Omega | 1.0);
+  // .. for the vector of standard deviations
+  target += cauchy_lpdf(tau_Omega | 0, 2.5);
+
+  // likelihood
+  for (i in 1:N) {
+    // subject-specific deviations
+    target += multi_normal_lpdf(u[i] | rep_vector(0,4), Omega);
+    
+    for (t in 2:T) {
+      // data given model parameters
+      target += normal_lpdf(delta[i][t] | phi[i] * delta[i][t-1] + alpha[i] * X[i][t], sqrt(psi[i]));
+    }
+  }
+}
+"
+```
+
+**Exercise 13: Update your data list <code>datUrges</code> (created in exercise 5) to include object <code>X</code>, containing the depression data.**
+
+```{r class.source = "fold-show", listforStan2}
+##### Your code here #####
+```
+
+**Exercise 14: Fit a DSEM including the depression covariate. Keep track of the population-level means and sds. Use <code>seed = 2094</code>. Report on the fourth RQ, that is, whether depression relates to urges. Also compare estimates of the other parameters to the ones you reported in exercise 8 and 9.**
+
+```{r class.source = "fold-show", fitDSEM_dep}
+##### Your code here #####
+```
+
+You're done... for now :) Additional modules will be added soon. <a href="#top">Go back to the top</a>.
+
+### Fitting a DYNASTI DSEM
+
+We are also interested in an additional fifth RQ. That is, we wish to test whether temporal dynamics, in this case autoregressive effects, differ for above- and below-average levels of smoking urges. It may be that periods of high urges tend to persist over time whereas periods of low urges do not. Or even better, the opposite. To test these expectations, you may fit a DYnamics of ASymmetric TIme series (DYNASTI) version of the model in which you estimate separate autoregressions for above and below mean values.
+
+### Predictors of DSEM parameters
